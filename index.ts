@@ -1,27 +1,154 @@
 import * as net from "net";
 
-function newConn(socket: net.Socket): void {
-  console.log("new connection", socket.remoteAddress, socket.remotePort);
-  socket.on("end", () => {
-    // FIN received. The connection will be closed automatically.
-    console.log("EOF.");
-  });
-  socket.on("data", (data: Buffer) => {
-    console.log("data:", data.toString());
-    socket.write("response from server : Hey client how's there"); // echo back the data.
+type TCPConn = {
+  // the JS socket object
+  socket: net.Socket;
+  // from the 'error' event
+  err: null | Error;
+  // EOF, from the 'end' event
+  ended: boolean;
+  // the callbacks of the promise of the current read
+  reader: null | {
+    resolve: (value: Buffer) => void;
+    reject: (reason: Error) => void;
+  };
+};
 
-    // actively closed the connection if the data contains 'q'
-    if (data.includes("q")) {
-      console.log("closing.");
-      socket.end(); // this will send FIN and close the connection.
+type TCPListener = {
+  socket: net.Socket;
+  err: null | Error;
+  ended: boolean;
+  acceptor: null | {
+    resolve: (value: net.Socket) => void;
+    reject: (reason: Error) => void;
+  };
+};
+
+function soInit(socket: net.Socket): TCPConn {
+  const conn: TCPConn = {
+    socket: socket,
+    err: null,
+    ended: false,
+    reader: null,
+  };
+  socket.on("data", (data: Buffer) => {
+    // omitted ...
+  });
+  socket.on("end", () => {
+    // this also fulfills the current read.
+    conn.ended = true;
+    if (conn.reader) {
+      conn.reader.resolve(Buffer.from("")); // EOF
+      conn.reader = null;
     }
+  });
+  socket.on("error", (err: Error) => {
+    // errors are also delivered to the current read.
+    conn.err = err;
+    console.log("socket error:", conn.err);
+
+    if (conn.reader) {
+      conn.reader.reject(err);
+      conn.reader = null;
+    }
+  });
+  return conn;
+}
+// returns an empty `Buffer` after EOF.
+function soRead(conn: TCPConn): Promise<Buffer> {
+  console.assert(!conn.reader); // no concurrent calls
+  return new Promise((resolve, reject) => {
+    // if the connection is not readable, complete the promise now.
+    if (conn.err) {
+      reject(conn.err);
+      return;
+    }
+    if (conn.ended) {
+      resolve(Buffer.from("")); // EOF
+      return;
+    }
+
+    // save the promise callbacks
+    conn.reader = { resolve: resolve, reject: reject };
+    // and resume the 'data' event to fulfill the promise later.
+    conn.socket.resume();
   });
 }
 
-let server = net.createServer();
-server.on("connection", newConn);
-server.listen({ host: "127.0.0.1", port: 1234 });
-server.on("error", (err: Error) => {
-  throw err;
-});
-console.log("server listening on port 1234");
+function soWrite(conn: TCPConn, data: Buffer): Promise<void> {
+  console.assert(data.length > 0);
+  return new Promise((resolve, reject) => {
+    if (conn.err) {
+      reject(conn.err);
+      return;
+    }
+
+    conn.socket.write(data, (err?: Error | null) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+function soListen(port: number): TCPListener {
+  const listener: TCPListener = {
+    socket: new net.Socket(),
+    err: null,
+    ended: false,
+    acceptor: null,
+  };
+  const server = net.createServer((socket) => {
+    soAccept(listener, socket);
+  });
+  server.on("error", (err: Error) => {
+    listener.err = err;
+    console.log("listener error:", listener.err);
+    if (listener.acceptor) {
+      listener.acceptor.reject(err);
+      listener.acceptor = null;
+    }
+  });
+  server.listen(port, () => {
+    console.log("listening on port", port);
+  });
+  return listener;
+}
+soListen(8080);
+
+function soAccept(listener: TCPListener, socket: net.Socket): void {
+  if (listener.acceptor) {
+    listener.acceptor.resolve(socket);
+    listener.acceptor = null;
+  } else {
+    // no pending accept, destroy the socket.
+    socket.destroy();
+  }
+}
+
+async function newConn(socket: net.Socket): Promise<void> {
+  console.log("new connection", socket.remoteAddress, socket.remotePort);
+  try {
+    await serveClient(socket);
+  } catch (exc) {
+    console.error("exception:", exc);
+  } finally {
+    socket.destroy();
+  }
+}
+
+async function serveClient(socket: net.Socket): Promise<void> {
+  const conn: TCPConn = soInit(socket);
+  while (true) {
+    const data = await soRead(conn);
+    if (data.length === 0) {
+      console.log("end connection");
+      break;
+    }
+
+    console.log("data", data);
+    await soWrite(conn, data);
+  }
+}
