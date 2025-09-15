@@ -24,6 +24,20 @@ type TCPListener = {
   };
 };
 
+async function main() {
+  const listener = soListen(8080);
+
+  while (true) {
+    const socket = await new Promise<net.Socket>((resolve, reject) => {
+      listener.acceptor = { resolve, reject };
+    });
+
+    newConn(socket); // handle in background
+  }
+}
+
+main();
+
 function soInit(socket: net.Socket): TCPConn {
   const conn: TCPConn = {
     socket: socket,
@@ -32,7 +46,8 @@ function soInit(socket: net.Socket): TCPConn {
     reader: null,
   };
   socket.on("data", (data: Buffer) => {
-    // omitted ...
+    // console.log("socket data:", data);
+    console.log("socket data:", data.toString());
   });
   socket.on("end", () => {
     // this also fulfills the current read.
@@ -40,6 +55,7 @@ function soInit(socket: net.Socket): TCPConn {
     if (conn.reader) {
       conn.reader.resolve(Buffer.from("")); // EOF
       conn.reader = null;
+      conn.socket.end();
     }
   });
   socket.on("error", (err: Error) => {
@@ -116,7 +132,6 @@ function soListen(port: number): TCPListener {
   });
   return listener;
 }
-soListen(8080);
 
 function soAccept(listener: TCPListener, socket: net.Socket): void {
   if (listener.acceptor) {
@@ -144,7 +159,7 @@ async function serveClient(socket: net.Socket): Promise<void> {
   while (true) {
     const data = await soRead(conn);
     if (data.length === 0) {
-      console.log("end connection");
+      console.log("connection closed by client");
       break;
     }
 
