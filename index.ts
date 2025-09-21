@@ -47,7 +47,15 @@ function soInit(socket: net.Socket): TCPConn {
   };
   socket.on("data", (data: Buffer) => {
     // console.log("socket data:", data);
-    console.log("socket data:", data.toString());
+    if (conn.reader) {
+      console.log("before resolving from data event", data.toString());
+
+      conn.reader.resolve(data); // deliver data to the current read
+      conn.reader = null;
+      socket.pause(); // pause until next soRead() resumes
+      console.log("socket data:", data.toString());
+      console.log("socket is paused");
+    }
   });
   socket.on("end", () => {
     // this also fulfills the current read.
@@ -81,9 +89,10 @@ function soRead(conn: TCPConn): Promise<Buffer> {
     }
     if (conn.ended) {
       resolve(Buffer.from("")); // EOF
+
       return;
     }
-
+    console.log("soRead: resuming socket");
     // save the promise callbacks
     conn.reader = { resolve: resolve, reject: reject };
     // and resume the 'data' event to fulfill the promise later.
@@ -116,7 +125,15 @@ function soListen(port: number): TCPListener {
     ended: false,
     acceptor: null,
   };
+  console.log("fuck u");
+
   const server = net.createServer((socket) => {
+    console.log(
+      "server got connection",
+      socket.remoteAddress,
+      socket.remotePort
+    );
+
     soAccept(listener, socket);
   });
   server.on("error", (err: Error) => {
@@ -163,7 +180,7 @@ async function serveClient(socket: net.Socket): Promise<void> {
       break;
     }
 
-    console.log("data", data);
+    // console.log("data", data.toString());
     await soWrite(conn, data);
   }
 }
