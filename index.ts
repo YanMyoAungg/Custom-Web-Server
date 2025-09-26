@@ -46,19 +46,17 @@ function soInit(socket: net.Socket): TCPConn {
     reader: null,
   };
   socket.on("data", (data: Buffer) => {
-    // console.log("socket data:", data);
     if (conn.reader) {
-      console.log("before resolving from data event", data.toString());
-
-      conn.reader.resolve(data); // deliver data to the current read
+      conn.reader.resolve(data);
       conn.reader = null;
-      socket.pause(); // pause until next soRead() resumes
+      socket.pause();
       console.log("socket data:", data.toString());
       console.log("socket is paused");
     }
   });
   socket.on("end", () => {
     // this also fulfills the current read.
+    console.log("socket end event fired");
     conn.ended = true;
     if (conn.reader) {
       conn.reader.resolve(Buffer.from("")); // EOF
@@ -92,11 +90,11 @@ function soRead(conn: TCPConn): Promise<Buffer> {
 
       return;
     }
-    console.log("soRead: resuming socket");
     // save the promise callbacks
     conn.reader = { resolve: resolve, reject: reject };
     // and resume the 'data' event to fulfill the promise later.
     conn.socket.resume();
+    console.log("soRead: resuming socket");
   });
 }
 
@@ -171,16 +169,87 @@ async function newConn(socket: net.Socket): Promise<void> {
   }
 }
 
+type DynBuf = {
+  data: Buffer;
+  length: number;
+  start: number;
+};
+
 async function serveClient(socket: net.Socket): Promise<void> {
   const conn: TCPConn = soInit(socket);
+  const buf: DynBuf = { data: Buffer.alloc(0), length: 0, start: 0 };
   while (true) {
-    const data = await soRead(conn);
-    if (data.length === 0) {
-      console.log("connection closed by client");
-      break;
+    const msg: null | Buffer = cutMessage(buf);
+    if (!msg) {
+      const data: Buffer = await soRead(conn);
+      bufPush(buf, data);
+      if (data.length === 0) {
+        console.log("connection closed by client");
+        break;
+      }
+      console.log("data", data.toString());
+      await soWrite(conn, data);
+      continue;
     }
+    // process the message and send the response
+    if (msg.equals(Buffer.from("quit\n"))) {
+      console.log("client quit");
 
-    // console.log("data", data.toString());
-    await soWrite(conn, data);
+      await soWrite(conn, Buffer.from("Bye.\n"));
+      socket.destroy();
+      return;
+    } else {
+      const reply = Buffer.concat([Buffer.from(`Echo: ${msg.toString()}`)]);
+      await soWrite(conn, reply);
+    }
   }
+}
+
+function bufPush(buf: DynBuf, data: Buffer): void {
+  console.log("buf start", buf.start);
+  console.log("buf length", buf.length);
+
+  const newLen = buf.length + buf.start + data.length;
+  if (buf.data.length < newLen) {
+    const newCap = Math.max(buf.data.length * 2, newLen);
+    const newBuf = Buffer.alloc(newCap);
+    buf.data.copy(newBuf, 0, buf.start, buf.start + buf.length);
+    buf.data = newBuf;
+    buf.start = 0;
+  }
+  data.copy(buf.data, buf.start + buf.length);
+  buf.length += data.length;
+}
+
+function cutMessage(buf: DynBuf): null | Buffer {
+  // messages are separated by '\n'
+  // In every message endings contains line feed(\r) and carriage return(\n)'\r\n'
+  const idx = buf.data
+    .subarray(buf.start, buf.length + buf.start)
+    .indexOf("\n");
+  console.log("got executed");
+
+  if (idx < 0) {
+    return null; // meaning not completed
+  }
+  // make a copy of the message and move the remaining data to the front
+  const msg = Buffer.from(buf.data.subarray(0, idx + 1));
+  console.log(msg.toString());
+
+  bufPop(buf, idx + 1);
+  return msg;
+}
+
+// No longer pop everything, just move the start forward
+function bufPop(buf: DynBuf, len: number): void {
+  buf.start += len;
+  buf.length -= len;
+
+  // Now only pop when necessary such as when the buffer is nearly full
+  if (buf.start * 2 > buf.data.length) {
+    buf.data.copyWithin(0, buf.start, buf.length + buf.start);
+    buf.start = 0;
+  }
+  buf.data.copyWithin(0, len, buf.length);
+  console.log("buf data remaining:", buf.data.toString("utf-8", 0, buf.length));
 }
